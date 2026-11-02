@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#fc4c02">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>Lari Saya</title>
+<style>
+:root{--bg:#fff;--fg:#1c1c1e;--mut:#6b6b70;--card:#f3f3f5;--acc:#fc4c02;--line:#e2e2e6}
+@media(prefers-color-scheme:dark){:root{--bg:#121214;--fg:#f2f2f4;--mut:#9a9aa2;--card:#1d1d21;--line:#2c2c32}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif;padding-bottom:72px}
+header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);z-index:2}
+h1{font-size:18px;margin:0}
+button{font:inherit;border:0;border-radius:10px;padding:8px 14px;background:var(--acc);color:#fff;cursor:pointer}
+button[hidden]{display:none}
+#status{padding:8px 16px;color:var(--mut);font-size:14px;min-height:20px}
+main{padding:0 16px}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--bg);border-top:1px solid var(--line)}
+nav button{flex:1;background:none;color:var(--mut);border-radius:0;padding:14px 4px;font-size:14px}
+nav button.on{color:var(--acc);font-weight:600}
+.row{display:flex;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
+.row small,.card small{display:block;color:var(--mut);font-size:13px}
+.r{text-align:right}
+.cards{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}
+.card{background:var(--card);border-radius:12px;padding:12px}
+.card b{font-size:22px}
+.bars{display:flex;align-items:flex-end;gap:6px;height:150px;margin:16px 0 6px}
+.bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;font-size:11px;color:var(--mut)}
+.bar div{width:100%;background:var(--acc);border-radius:4px 4px 0 0;min-height:2px}
+.plan{align-items:center}
+.plan .d{width:34px;font-weight:600}
+.plan input:nth-of-type(1){flex:1}
+.plan input:nth-of-type(2){width:60px}
+input{font:inherit;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px;min-width:0}
+label{display:block;margin:12px 0 4px;color:var(--mut);font-size:13px}
+label+input{width:100%}
+.empty{color:var(--mut);padding:24px 0;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>🏃 Lari Saya</h1>
+  <div>
+    <button id="connect" hidden>Hubungkan Strava</button>
+    <button id="sync" hidden>Sinkron</button>
+  </div>
+</header>
+<div id="status"></div>
+<main id="view"></main>
+<nav>
+  <button data-t="runs">Riwayat</button>
+  <button data-t="stats">Statistik</button>
+  <button data-t="plan">Rencana</button>
+  <button data-t="goal">Target</button>
+</nav>
+
+<script>
+// ====== ISI DUA BARIS INI ======
+const CONFIG = {
+  CLIENT_ID: 'ISI_CLIENT_ID_STRAVA',
+  WORKER_URL: 'https://NAMA-WORKER.AKUN.workers.dev'   // tanpa garis miring di akhir
+};
+// ===============================
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
+const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+const setStatus = t => { $('#status').textContent = t || ''; };
+const REDIRECT = location.origin + location.pathname;
+const DAYS = ['Sen','Sel','Rab','Kam','Jum','Sab','Min'];
+
+/* ---------- Format & tanggal ---------- */
+const pace = (km, sec) => {
+  if (!km) return '–';
+  const t = Math.round(sec / km);
+  return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0');
+};
+const dur = sec => {
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
+};
+// start_date_local dari Strava = jam lokal yang diberi label Z, jadi baca pakai getUTC*
+const wk = ds => { const d = new Date(ds); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - (d.getUTCDay() + 6) % 7); };
+const thisWeek = () => { const n = new Date(); return Date.UTC(n.getFullYear(), n.getMonth(), n.getDate() - (n.getDay() + 6) % 7); };
+const dayIdx = ds => (new Date(ds).getUTCDay() + 6) % 7;
+
+/* ---------- Login & token ---------- */
+function connect() {
+  if (CONFIG.CLIENT_ID.startsWith('ISI')) return setStatus('Isi CONFIG di index.html dulu.');
+  const state = crypto.randomUUID();
+  localStorage.setItem('oauth_state', state);
+  const u = new URL('https://www.strava.com/oauth/authorize');
+  u.search = new URLSearchParams({
+    client_id: CONFIG.CLIENT_ID, redirect_uri: REDIRECT, response_type: 'code',
+    approval_prompt: 'auto', scope: 'read,activity:read_all', state
+  });
+  location.href = u;
+}
+
+async function post(path, body) {
+  const r = await fetch(CONFIG.WORKER_URL + path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  if (!r.ok) throw new Error('Worker ' + path + ' gagal (' + r.status + ')');
+  return r.json();
+}
+
+async function handleCallback() {
+  const p = new URLSearchParams(location.search);
+  if (!p.has('code') && !p.has('error')) return;
+  const code = p.get('code'), state = p.get('state'), err = p.get('error');
+  history.replaceState(null, '', REDIRECT);
+  if (err) return setStatus('Otorisasi dibatalkan.');
+  if (state !== localStorage.getItem('oauth_state')) return setStatus('State tidak cocok, coba hubungkan lagi.');
+  localStorage.removeItem('oauth_state');
+  setStatus('Menghubungkan ke Strava…');
+  const n = await post('/token', { code });
+  save('tokens', { access_token: n.access_token, refresh_token: n.refresh_token, expires_at: n.expires_at });
+  await doSync();
+}
+
+async function accessToken() {
+  let t = load('tokens', null);
+  if (!t) return null;
+  if (t.expires_at * 1000 - Date.now() < 60000) {   // hampir kedaluwarsa -> perbarui
+    const n = await post('/refresh', { refresh_token: t.refresh_token });
+    t = { access_token: n.access_token, refresh_token: n.refresh_token, expires_at: n.expires_at };
+    save('tokens', t);
+  }
+  return t.access_token;
+}
+
+/* ---------- Ambil data lari ---------- */
+async function sync() {
+  const tok = await accessToken();
+  if (!tok) return;
+  const after = Math.floor(Date.now() / 1000) - 180 * 86400;   // 180 hari terakhir
+  let all = [];
+  for (let page = 1; page <= 5; page++) {
+    const r = await fetch(`${CONFIG.WORKER_URL}/api/athlete/activities?per_page=100&page=${page}&after=${after}`,
+      { headers: { Authorization: 'Bearer ' + tok } });
+    if (r.status === 401) { localStorage.removeItem('tokens'); throw new Error('Token ditolak, hubungkan ulang.'); }
+    if (r.status === 429) throw new Error('Kena batas rate limit Strava. Coba lagi ±15 menit.');
+    if (!r.ok) throw new Error('Strava error ' + r.status);
+    const rows = await r.json();
+    all = all.concat(rows);
+    if (rows.length < 100) break;
+  }
+  const fresh = all
+    .filter(a => ['Run', 'TrailRun', 'VirtualRun'].includes(a.sport_type || a.type))
+    .map(a => ({ id: a.id, name: a.name, date: a.start_date_local, km: a.distance / 1000,
+                 sec: a.moving_time, hr: a.average_heartrate || null }));
+  const byId = new Map(load('runs', []).map(r => [r.id, r]));   // gabung dengan data lama
+  fresh.forEach(r => byId.set(r.id, r));
+  save('runs', [...byId.values()]);
+  save('synced', Date.now());
+}
+
+async function doSync() {
+  try { setStatus('Mengambil data…'); await sync(); setStatus('Terakhir sinkron: ' + new Date().toLocaleTimeString('id-ID')); }
+  catch (e) { setStatus(e.message); }
+  render();
+}
+
+/* ---------- Tampilan ---------- */
+let tab = 'runs';
+
+function viewRuns(runs) {
+  if (!runs.length) return '<div class="empty">Belum ada data lari. Hubungkan Strava lalu tekan Sinkron.</div>';
+  return runs.slice(0, 50).map(r => `
+    <div class="row">
+      <div><b>${esc(r.name)}</b><small>${esc(r.date.slice(0, 10))}</small></div>
+      <div class="r"><b>${r.km.toFixed(2)} km</b>
+        <small>${pace(r.km, r.sec)}/km · ${dur(r.sec)}${r.hr ? ' · ' + Math.round(r.hr) + ' bpm' : ''}</small></div>
+    </div>`).join('');
+}
+
+function viewStats(runs) {
+  const tw = thisWeek();
+  const weeks = [...Array(8)].map((_, i) => tw - (7 - i) * 6048e5);
+  const sums = weeks.map(w => runs.filter(r => wk(r.date) === w).reduce((s, r) => s + r.km, 0));
+  const max = Math.max(...sums, 1);
+  const n = new Date(), ym = n.getFullYear() + '-' + String(n.getMonth() + 1).padStart(2, '0');
+  const month = runs.filter(r => r.date.slice(0, 7) === ym).reduce((s, r) => s + r.km, 0);
+  const l30 = runs.filter(r => Date.now() - new Date(r.date).getTime() < 30 * 864e5);
+  const km30 = l30.reduce((s, r) => s + r.km, 0), sec30 = l30.reduce((s, r) => s + r.sec, 0);
+  const longest = Math.max(0, ...l30.map(r => r.km));
+  return `
+    <div class="cards">
+      <div class="card"><small>Minggu ini</small><b>${sums[7].toFixed(1)} km</b></div>
+      <div class="card"><small>Bulan ini</small><b>${month.toFixed(1)} km</b></div>
+      <div class="card"><small>Pace rata-rata 30 hari</small><b>${pace(km30, sec30)}/km</b></div>
+      <div class="card"><small>Terpanjang 30 hari</small><b>${longest.toFixed(1)} km</b></div>
+    </div>
+    <small style="color:var(--mut)">Jarak per minggu (8 minggu terakhir, mulai tanggal)</small>
+    <div class="bars">${sums.map((s, i) => {
+      const d = new Date(weeks[i]);
+      return `<div class="bar"><span>${s.toFixed(0)}</span><div style="height:${s / max * 100 * 0.8}%"></div><span>${d.getUTCDate()}/${d.getUTCMonth() + 1}</span></div>`;
+    }).join('')}</div>`;
+}
+
+function viewPlan(runs) {
+  const plan = load('plan', Array.from({ length: 7 }, () => ({ note: '', km: '' })));
+  const tw = thisWeek(), act = Array(7).fill(0);
+  runs.filter(r => wk(r.date) === tw).forEach(r => act[dayIdx(r.date)] += r.km);
+  const planKm = plan.reduce((s, p) => s + (parseFloat(p.km) || 0), 0);
+  const actKm = act.reduce((s, v) => s + v, 0);
+  return `
+    <p style="color:var(--mut);margin:12px 0 0">Rencana mingguan (berulang tiap minggu). Kolom kanan = realisasi dari Strava.</p>
+    ${plan.map((p, i) => `
+      <div class="row plan">
+        <span class="d">${DAYS[i]}</span>
+        <input data-i="${i}" data-f="note" value="${esc(p.note)}" placeholder="Easy / Interval / Libur">
+        <input data-i="${i}" data-f="km" inputmode="decimal" value="${esc(p.km)}" placeholder="km">
+        <small style="width:56px;text-align:right">${act[i] ? act[i].toFixed(1) + ' ✓' : ''}</small>
+      </div>`).join('')}
+    <div class="cards">
+      <div class="card"><small>Target minggu ini</small><b>${planKm.toFixed(1)} km</b></div>
+      <div class="card"><small>Realisasi</small><b>${actKm.toFixed(1)} km</b></div>
+    </div>`;
+}
+
+function viewGoal(runs) {
+  const g = load('goal', { name: '', date: '', km: '', min: '' });
+  const km = parseFloat(g.km), min = parseFloat(g.min);
+  const days = g.date ? Math.round((new Date(g.date) - new Date(new Date().toDateString())) / 864e5) : null;
+  const l28 = runs.filter(r => Date.now() - new Date(r.date).getTime() < 28 * 864e5);
+  const avgWeek = l28.reduce((s, r) => s + r.km, 0) / 4;
+  const longest = Math.max(0, ...l28.map(r => r.km));
+  return `
+    <label>Nama lomba / target</label><input data-g="name" value="${esc(g.name)}" placeholder="mis. 10K Jakarta">
+    <label>Tanggal</label><input data-g="date" type="date" value="${esc(g.date)}">
+    <label>Jarak (km)</label><input data-g="km" inputmode="decimal" value="${esc(g.km)}">
+    <label>Target waktu (menit)</label><input data-g="min" inputmode="decimal" value="${esc(g.min)}">
+    <div class="cards">
+      <div class="card"><small>Sisa hari</small><b>${days === null ? '–' : days}</b></div>
+      <div class="card"><small>Pace target</small><b>${km && min ? pace(km, min * 60) + '/km' : '–'}</b></div>
+      <div class="card"><small>Rata-rata km/minggu (4 mgg)</small><b>${avgWeek.toFixed(1)}</b></div>
+      <div class="card"><small>Lari terpanjang vs jarak lomba</small><b>${km ? Math.round(longest / km * 100) + '%' : '–'}</b></div>
+    </div>`;
+}
+
+function render() {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.t === tab));
+  const connected = !!load('tokens', null);
+  $('#connect').hidden = connected;
+  $('#sync').hidden = !connected;
+  const runs = load('runs', []).sort((a, b) => b.date.localeCompare(a.date));
+  $('#view').innerHTML = { runs: viewRuns, stats: viewStats, plan: viewPlan, goal: viewGoal }[tab](runs);
+}
+
+/* ---------- Event ---------- */
+document.querySelector('nav').addEventListener('click', e => {
+  if (e.target.dataset.t) { tab = e.target.dataset.t; render(); }
+});
+$('#connect').onclick = connect;
+$('#sync').onclick = doSync;
+$('#view').addEventListener('change', e => {
+  const t = e.target;
+  if (t.dataset.f) {                       // rencana mingguan
+    const plan = load('plan', Array.from({ length: 7 }, () => ({ note: '', km: '' })));
+    plan[t.dataset.i][t.dataset.f] = t.value;
+    save('plan', plan);
+  } else if (t.dataset.g) {                // target lomba
+    const g = load('goal', { name: '', date: '', km: '', min: '' });
+    g[t.dataset.g] = t.value;
+    save('goal', g);
+  } else return;
+  render();
+});
+
+/* ---------- Mulai ---------- */
+(async () => {
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  try { await handleCallback(); } catch (e) { setStatus(e.message); }
+  render();
+  if (load('tokens', null) && Date.now() - load('synced', 0) > 15 * 60e3) doSync();
+})();
+</script>
+</body>
+</html>
